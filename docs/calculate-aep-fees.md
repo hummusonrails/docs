@@ -1,23 +1,23 @@
 ---
 id: calculate-aep-fees
-title: 'AEP Fees Formula'
+title: AEP Fees Formula
 sidebar_label: AEP Fees Formula
 description: Information for operators of Arbitrum Chains on how to compute the AEP Fees
 dao_author: stonecoldpat
 dao_sme: stonecoldpat
 ---
-
 # Fee Calculation for Arbitrum Expansion Program
 
-All blockchains, including Arbitrum Chains, enable users to create transactions, pay fees, and perform executions on the network. 
+All blockchains, including Arbitrum Chains, enable users to create transactions, pay fees, and perform executions on the network.  test
 
 ## Fees in Arbitrum Chains
+
 In Arbitrum, the chain collects all fees paid by users, and each fee paid is split up to cover different costs associated with the chain. This split includes: 
 
-- `L1BaseFee`: Fees collected to cover the cost to settle the Rollup's transactions on the parent chain (i.e., blob data). 
-- `L1SurplusFee`: Surplus funds after covering the cost to settle transactions on the parent chain. 
-- `L2BaseFee`: Fees collected to cover the cost of executing transactions based on the L2 gas consumed. 
-- `L2SurplusFee`: Surplus fees collected when an Arbitrum chain is congested. 
+* `L1BaseFee`: Fees collected to cover the cost to settle the Rollup's transactions on the parent chain (i.e., blob data). 
+* `L1SurplusFee`: Surplus funds after covering the cost to settle transactions on the parent chain. 
+* `L2BaseFee`: Fees collected to cover the cost of executing transactions based on the L2 gas consumed. 
+* `L2SurplusFee`: Surplus fees collected when an Arbitrum chain is congested. 
 
 Note that all transaction fees on Arbitrum Chains are deterministic, based on their initial configuration, activity on the chain, and congestion of the parent chain. The Sequencer cannot tweak or impact the fees in real-time. 
 
@@ -39,7 +39,7 @@ AEP_FEES = [(sequencing revenue + additional revenue) - (settlement costs)]*0.1
 
  Finally, to connect the net protocol revenue with how the fees are collected on an Arbitrum Chain, they are computed using the following formula:
 
- ```python
+```python
 AEP_FEES = [(l2BaseFee + l2SurplusFee + l1BaseFee + l1SurplusFee) - (l1BaseFee)]*0.1
 ```
 
