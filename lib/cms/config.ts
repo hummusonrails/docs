@@ -8,6 +8,9 @@ export const cmsConfig = {
   constitutionHashPath: 'lib/constitution-hash.json',
 };
 
+// a sandbox deployment runs every save check but never writes to github
+export const cmsSandbox = process.env.CMS_SANDBOX === 'true';
+
 export const tokenCookie = 'af_cms_token';
 export const stateCookie = 'af_cms_oauth_state';
 

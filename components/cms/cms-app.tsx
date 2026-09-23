@@ -56,7 +56,7 @@ function toOpenDocument(document: CmsDocument, version: number): OpenDocument {
   };
 }
 
-export function CmsApp() {
+export function CmsApp({ sandbox = false }: { sandbox?: boolean }) {
   const [session, setSession] = useState<SessionState>({ status: 'loading' });
 
   useEffect(() => {
@@ -73,11 +73,23 @@ export function CmsApp() {
       </main>
     );
   }
-  if (session.status === 'signed-out') return <SignIn />;
+  if (session.status === 'signed-out') return <SignIn sandbox={sandbox} />;
   return <Workspace viewer={session.viewer} />;
 }
 
-function SignIn() {
+function SandboxNotice({ className = '' }: { className?: string }) {
+  return (
+    <p
+      role="note"
+      className={`rounded-sm border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-sm text-amber-900 dark:text-amber-200 ${className}`}
+    >
+      <strong>Sandbox preview.</strong> Nothing you do here is saved, so please do not do real work
+      here. Saving only checks the page for problems.
+    </p>
+  );
+}
+
+function SignIn({ sandbox }: { sandbox: boolean }) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-af-navy p-6">
       <div className="flex w-full max-w-sm flex-col items-center gap-6 rounded-sm bg-fd-card p-8 text-center shadow-lg">
@@ -95,6 +107,7 @@ function SignIn() {
             Sign in with a GitHub account that can edit the governance docs.
           </p>
         </div>
+        {sandbox ? <SandboxNotice className="text-left" /> : null}
         <form action="/api/auth" method="get" className="w-full">
           <button
             type="submit"
@@ -109,7 +122,9 @@ function SignIn() {
 }
 
 function Workspace({ viewer }: { viewer: Viewer }) {
-  const { repository } = viewer;
+  const { repository, sandbox } = viewer;
+  // everyone can try the editor in the sandbox because nothing is written
+  const canEdit = viewer.canWrite || sandbox;
   const [files, setFiles] = useState<CmsFile[]>([]);
   const [repoPaths, setRepoPaths] = useState<string[]>([]);
   const [listError, setListError] = useState<string>();
@@ -249,7 +264,7 @@ function Workspace({ viewer }: { viewer: Viewer }) {
       setBodyDirty(false);
       setNotice(undefined);
       setSaveState({ status: 'saved' });
-      refreshFiles();
+      if (!sandbox) refreshFiles();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.latest) {
         await mergeLatest(error.latest);
@@ -269,7 +284,7 @@ function Workspace({ viewer }: { viewer: Viewer }) {
         problems: error instanceof ApiError ? error.problems : [],
       });
     }
-  }, [document, details, composeContent, mergeLatest, refreshFiles, linkTitles]);
+  }, [document, details, composeContent, mergeLatest, refreshFiles, linkTitles, sandbox]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -320,13 +335,14 @@ function Workspace({ viewer }: { viewer: Viewer }) {
       body.current = created.body;
       setDocument(created);
       setDetails(created.details);
-      refreshFiles();
+      // the sandbox never writes, so a refresh would drop the page that was just created
+      if (!sandbox) refreshFiles();
     },
-    [dirty, refreshFiles]
+    [dirty, refreshFiles, sandbox]
   );
 
   const media = useMemo<MediaProvider | undefined>(() => {
-    if (!document) return undefined;
+    if (!document || sandbox) return undefined;
     return {
       upload: async (file) => {
         if (!imageTypes.has(file.type)) {
@@ -346,7 +362,7 @@ function Workspace({ viewer }: { viewer: Viewer }) {
           ? `https://raw.githubusercontent.com/${repository.owner}/${repository.repo}/${encodeURIComponent(document.ref)}/public${src}`
           : src,
     };
-  }, [document, repository]);
+  }, [document, repository, sandbox]);
 
   const fileProvider = useMemo(() => createFileProvider(repoPaths), [repoPaths]);
 
@@ -415,7 +431,8 @@ function Workspace({ viewer }: { viewer: Viewer }) {
             <LogOut className="size-4" />
           </button>
         </div>
-        {!viewer.canWrite ? (
+        {sandbox ? <SandboxNotice className="m-2 text-xs" /> : null}
+        {!canEdit ? (
           <p className="border-b bg-fd-muted p-3 text-xs text-fd-muted-foreground">
             Your account can read but not save. Ask a docs maintainer for write access to{' '}
             {repository.owner}/{repository.repo}.
@@ -425,7 +442,7 @@ function Workspace({ viewer }: { viewer: Viewer }) {
         <PageList
           files={files}
           activePath={activePath}
-          canWrite={viewer.canWrite}
+          canWrite={canEdit}
           onOpen={(path) => void openFile(path)}
           onStartCreate={setCreatingIn}
         />
@@ -455,7 +472,12 @@ function Workspace({ viewer }: { viewer: Viewer }) {
                   <h1 className="truncate text-sm font-semibold">
                     {activeFile?.label ?? details.title ?? document.path}
                   </h1>
-                  <StatusChip document={document} dirty={dirty} saveState={saveState} />
+                  <StatusChip
+                    document={document}
+                    dirty={dirty}
+                    saveState={saveState}
+                    sandbox={sandbox}
+                  />
                   {isConstitution ? (
                     <span className="shrink-0 rounded-sm bg-red-500/15 px-1.5 py-0.5 text-[11px] font-medium text-red-700 dark:text-red-400">
                       Saving updates the constitution hash
@@ -494,10 +516,11 @@ function Workspace({ viewer }: { viewer: Viewer }) {
                   <GitPullRequest className="size-3.5" />
                   Review on GitHub
                 </a>
-                {viewer.canWrite ? (
+                {canEdit ? (
                   <>
                     <button
                       type="button"
+                      hidden={sandbox}
                       disabled={uploading}
                       onClick={() => pdfInput.current?.click()}
                       className="inline-flex items-center gap-1.5 rounded-sm border px-2.5 py-1.5 text-xs hover:bg-fd-accent disabled:opacity-50"
@@ -523,7 +546,11 @@ function Workspace({ viewer }: { viewer: Viewer }) {
                       className="inline-flex w-28 items-center justify-center gap-1.5 rounded-sm bg-fd-primary px-3 py-1.5 text-xs font-medium text-fd-primary-foreground hover:opacity-90 disabled:opacity-50"
                     >
                       <Save className="size-3.5" />
-                      {saveState.status === 'saving' ? 'Saving…' : 'Save draft'}
+                      {saveState.status === 'saving'
+                        ? 'Checking…'
+                        : sandbox
+                          ? 'Check page'
+                          : 'Save draft'}
                     </button>
                   </>
                 ) : null}
@@ -549,11 +576,12 @@ function Workspace({ viewer }: { viewer: Viewer }) {
               {saveState.status === 'saved' ? (
                 <Banner
                   tone="info"
-                  title="Draft saved"
+                  title={sandbox ? 'No problems found' : 'Draft saved'}
                   onClose={() => setSaveState({ status: 'idle' })}
                 >
-                  Your change is waiting for review. A docs maintainer checks it and publishes it to
-                  the live site.
+                  {sandbox
+                    ? 'This page would save cleanly. This is a sandbox, so nothing was saved.'
+                    : 'Your change is waiting for review. A docs maintainer checks it and publishes it to the live site.'}
                 </Banner>
               ) : null}
               {notice ? (
@@ -574,7 +602,7 @@ function Workspace({ viewer }: { viewer: Viewer }) {
                 <PageDetails
                   details={details}
                   error={document.detailsError}
-                  disabled={!viewer.canWrite}
+                  disabled={!canEdit}
                   onChange={(key, value) => {
                     setDetails((current) => (current ? { ...current, [key]: value } : current));
                     if (saveState.status === 'saved') setSaveState({ status: 'idle' });
@@ -586,7 +614,7 @@ function Workspace({ viewer }: { viewer: Viewer }) {
                 ref={editor}
                 key={`${document.path}:${document.version}`}
                 defaultValue={document.body}
-                editable={viewer.canWrite}
+                editable={canEdit}
                 components={editorComponents}
                 media={media}
                 files={fileProvider}
@@ -682,15 +710,19 @@ function StatusChip({
   document,
   dirty,
   saveState,
+  sandbox,
 }: {
   document: CmsDocument;
   dirty: boolean;
   saveState: SaveState;
+  sandbox: boolean;
 }) {
   const label = dirty
     ? 'Unsaved changes'
     : saveState.status === 'saved'
-      ? 'Saved, waiting for review'
+      ? sandbox
+        ? 'Checked, not saved'
+        : 'Saved, waiting for review'
       : document.isDraft
         ? 'Draft waiting for review'
         : 'Same as the live page';

@@ -9,6 +9,7 @@ export type Viewer = {
   name: string | null;
   avatarUrl: string;
   canWrite: boolean;
+  sandbox: boolean;
   repository: Repository;
 };
 
@@ -34,7 +35,8 @@ export type SaveResult = {
   sha: string;
   ref: string;
   isDraft: boolean;
-  pullRequestUrl: string;
+  pullRequestUrl: string | null;
+  sandbox?: boolean;
 };
 
 export type Preview = {

@@ -17,6 +17,8 @@ export const metadata: Metadata = {
   icons: {
     icon: '/img/favicon.ico',
   },
+  // sandbox deployments are for trying the editor and must not be indexed
+  ...(process.env.CMS_SANDBOX === 'true' ? { robots: { index: false, follow: false } } : {}),
 };
 
 export default function Layout({ children }: { children: ReactNode }) {
