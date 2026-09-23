@@ -81,6 +81,15 @@ export function createGitHubClient(token: string) {
 
     getBranchSha,
 
+    async listAddedFiles(base: string, head: string) {
+      const comparison = await request<{ files?: { filename: string; status: string }[] }>(
+        `${repoPath}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`
+      );
+      return (comparison?.files ?? [])
+        .filter((file) => file.status === 'added')
+        .map((file) => file.filename);
+    },
+
     async getFile(path: string, ref: string) {
       const file = await request<{ content: string; sha: string }>(
         `${repoPath}/contents/${encodeURI(path)}?ref=${encodeURIComponent(ref)}`,

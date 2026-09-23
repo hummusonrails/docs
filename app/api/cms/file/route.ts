@@ -1,6 +1,7 @@
 import { keccak256 } from '@ethersproject/solidity';
 import { NextResponse } from 'next/server';
 
+import { checkDocument } from '@/lib/cms/check-document';
 import { branchFor, cmsConfig, isEditablePath } from '@/lib/cms/config';
 import { ensurePullRequest } from '@/lib/cms/pull-request';
 import { jsonError, withGitHub } from '@/lib/cms/session';
@@ -43,17 +44,33 @@ export const PUT = withGitHub(async (github, request) => {
   if (!viewer.canWrite) return jsonError('you do not have write access to this repository', 403);
 
   const branch = branchFor(path);
-  await github.ensureBranch(branch);
-  const current = await github.getFile(path, branch);
+  const branchExists = Boolean(await github.getBranchSha(branch));
+  const ref = branchExists ? branch : cmsConfig.baseBranch;
+  const [current, repoPaths] = await Promise.all([
+    github.getFile(path, ref),
+    github.listFiles(ref),
+  ]);
 
   if (body.create && current) return jsonError('a page with this name already exists', 409);
   if (!body.create && !current) return jsonError('file not found', 404);
   if (current && body.sha && current.sha !== body.sha) {
-    return jsonError(
-      'this page changed since you opened it, reload to get the latest version',
-      409
+    return NextResponse.json(
+      { error: 'this page changed since you opened it', conflict: true, latest: current },
+      { status: 409 }
     );
   }
+
+  const problems = checkDocument({
+    path,
+    content: body.content,
+    create: Boolean(body.create),
+    repoFiles: new Set([...repoPaths, path]),
+  });
+  if (problems.length > 0) {
+    return NextResponse.json({ error: 'the page has problems to fix', problems }, { status: 422 });
+  }
+
+  await github.ensureBranch(branch);
 
   const sha = await github.putFile({
     path,
