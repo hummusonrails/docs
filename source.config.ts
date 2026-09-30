@@ -26,5 +26,21 @@ export default defineConfig({
     ],
     rehypePlugins: (plugins) => [rehypeKatex, ...plugins],
     remarkImageOptions: { external: false },
+    // the text variation selector keeps footnote back arrows from rendering as emoji
+    remarkRehypeOptions: {
+      footnoteBackContent: (_, rereferenceIndex) => [
+        { type: 'text', value: '↩︎' },
+        ...(rereferenceIndex > 1
+          ? [
+              {
+                type: 'element' as const,
+                tagName: 'sup',
+                properties: {},
+                children: [{ type: 'text' as const, value: String(rereferenceIndex) }],
+              },
+            ]
+          : []),
+      ],
+    },
   },
 });
