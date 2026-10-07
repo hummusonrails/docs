@@ -5,17 +5,32 @@ import '@fumadocs-editor/ui/styles.css';
 import { MdxEditor, type MdxEditorRef, type MediaProvider } from '@fumadocs-editor/ui';
 import { Check, Copy, ExternalLink, FileUp, GitPullRequest, LogOut, Save, X } from 'lucide-react';
 import Image from 'next/image';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import { cmsConfig, collectionFor } from '@/lib/cms/config';
 import { pageUrlFromPath, splitFrontmatter } from '@/lib/cms/paths';
 import { siteUrl } from '@/lib/site';
 import glossary from '@/public/glossary.json';
 
-import { ApiError, cmsApi, type CmsDocument, type CmsFile, type Viewer } from './api';
+import {
+  ApiError,
+  cmsApi,
+  type CmsDocument,
+  type CmsFile,
+  type UploadResult,
+  type Viewer,
+} from './api';
 import { createFileProvider, editorComponents } from './editor-config';
 import { readDetails, writeDetails, type DetailKey, type Details } from './frontmatter';
-import { uploadToDraft } from './github-upload';
+import { uploadToDraft } from './draft-upload';
 import { nameBareLinks, relativizeSiteLinks } from './link-titles';
 import { NewPageDialog } from './new-page-dialog';
 import { PageDetails } from './page-details';
@@ -41,6 +56,10 @@ type OpenDocument = CmsDocument & {
 };
 
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function sameDetails(a: Details, b: Details) {
+  return Object.entries(a).every(([key, value]) => value.trim() === b[key as DetailKey].trim());
+}
 
 function toOpenDocument(document: CmsDocument, version: number): OpenDocument {
   const { frontmatter, raw, body } = splitFrontmatter(document.content);
@@ -125,15 +144,23 @@ function Workspace({ viewer }: { viewer: Viewer }) {
   const body = useRef('');
   const editor = useRef<MdxEditorRef>(null);
   const pdfInput = useRef<HTMLInputElement>(null);
+  // bumps whenever another page is shown, so late responses for the previous page are ignored
+  const loadSeq = useRef(0);
+  // the save in flight, resolving to whether edits are still unsaved once it finishes
+  const saving = useRef<Promise<boolean> | null>(null);
 
-  const detailsDirty = Boolean(
-    document &&
-    details &&
-    Object.entries(details).some(
-      ([key, value]) => value.trim() !== document.details[key as DetailKey].trim()
-    )
-  );
+  const detailsDirty = Boolean(document && details && !sameDetails(details, document.details));
   const dirty = bodyDirty || detailsDirty;
+  const latest = useRef({ dirty, details });
+  useLayoutEffect(() => {
+    latest.current = { dirty, details };
+  });
+
+  // waits for a save in flight so leaving the page never races it, then asks before discarding edits
+  const confirmLeave = useCallback(async (question: string) => {
+    const stillDirty = saving.current ? await saving.current : latest.current.dirty;
+    return !stillDirty || window.confirm(question);
+  }, []);
 
   const refreshFiles = useCallback(
     () =>
@@ -162,8 +189,9 @@ function Workspace({ viewer }: { viewer: Viewer }) {
   }, [dirty]);
 
   const openFile = useCallback(
-    async (path: string, { force = false }: { force?: boolean } = {}) => {
-      if (!force && dirty && !window.confirm('You have unsaved changes. Discard them?')) return;
+    async (path: string) => {
+      if (!(await confirmLeave('You have unsaved changes. Discard them?'))) return;
+      const seq = ++loadSeq.current;
       setActivePath(path);
       setDocument(undefined);
       setDetails(undefined);
@@ -173,14 +201,16 @@ function Workspace({ viewer }: { viewer: Viewer }) {
       setNotice(undefined);
       try {
         const loaded = toOpenDocument(await cmsApi.file(path), Date.now());
+        if (seq !== loadSeq.current) return;
         body.current = loaded.body;
         setDocument(loaded);
         setDetails(loaded.details);
       } catch (error) {
+        if (seq !== loadSeq.current) return;
         setLoadError(error instanceof Error ? error.message : 'could not load this page');
       }
     },
-    [dirty]
+    [confirmLeave]
   );
 
   const composeContent = useCallback(() => {
@@ -227,64 +257,83 @@ function Workspace({ viewer }: { viewer: Viewer }) {
     return titles;
   }, [files]);
 
-  const save = useCallback(async () => {
-    if (!document || !details) return;
-    const named = nameBareLinks(relativizeSiteLinks(body.current, siteUrl), linkTitles);
-    const renamedLinks = named !== body.current;
-    body.current = named;
-    if (!details.title.trim() && document.frontmatter !== null) {
-      setSaveState({ status: 'error', message: 'Add a title before saving.', problems: [] });
-      return;
-    }
-    setSaveState({ status: 'saving' });
-    const content = composeContent();
-    try {
-      const result = await cmsApi.save({ path: document.path, content, sha: document.sha });
-      const saved = toOpenDocument({ ...document, ...result, content }, document.version);
-      setDocument({ ...saved, version: document.version });
-      setDetails(saved.details);
-      body.current = saved.body;
-      if (renamedLinks) await editor.current?.setMarkdown(saved.body);
-      editor.current?.markSaved(saved.body);
-      setBodyDirty(false);
-      setNotice(undefined);
-      setSaveState({ status: 'saved' });
-      refreshFiles();
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409 && error.latest) {
-        await mergeLatest(error.latest);
-        return;
+  const save = useCallback((): Promise<boolean> => {
+    // one save at a time, a second ⌘S while saving just waits for the first
+    if (saving.current) return saving.current;
+    if (!document || !details) return Promise.resolve(latest.current.dirty);
+    const run = async (): Promise<boolean> => {
+      const seq = loadSeq.current;
+      // name bare links before sending, so the response never has to replace text typed meanwhile
+      const named = nameBareLinks(relativizeSiteLinks(body.current, siteUrl), linkTitles);
+      if (named !== body.current) {
+        body.current = named;
+        await editor.current?.setMarkdown(named);
       }
-      const message =
-        error instanceof ApiError && error.status === 401
-          ? 'Your session expired. Sign in again to save.'
-          : error instanceof ApiError && error.problems.length > 0
-            ? 'This page has problems to fix before it can be saved:'
-            : error instanceof Error
-              ? error.message
-              : 'Saving failed.';
-      setSaveState({
-        status: 'error',
-        message,
-        problems: error instanceof ApiError ? error.problems : [],
-      });
-    }
+      if (!details.title.trim() && document.frontmatter !== null) {
+        setSaveState({ status: 'error', message: 'Add a title before saving.', problems: [] });
+        return true;
+      }
+      setSaveState({ status: 'saving' });
+      const savedBody = body.current;
+      const content = composeContent();
+      try {
+        const result = await cmsApi.save({ path: document.path, content, sha: document.sha });
+        refreshFiles();
+        if (seq !== loadSeq.current) return false;
+        const saved = toOpenDocument({ ...document, ...result, content }, document.version);
+        // the saved text becomes the baseline, anything typed during the save stays unsaved
+        setDocument({ ...saved, version: document.version });
+        editor.current?.markSaved(savedBody);
+        const bodyStillDirty = body.current !== savedBody;
+        const current = latest.current.details;
+        const detailsStillDirty = Boolean(current && !sameDetails(current, saved.details));
+        setBodyDirty(bodyStillDirty);
+        setNotice(undefined);
+        setSaveState({ status: 'saved' });
+        return bodyStillDirty || detailsStillDirty;
+      } catch (error) {
+        if (seq !== loadSeq.current) return false;
+        if (error instanceof ApiError && error.status === 409 && error.latest) {
+          await mergeLatest(error.latest);
+          return true;
+        }
+        const message =
+          error instanceof ApiError && error.status === 401
+            ? 'Your session expired. Sign in again to save.'
+            : error instanceof ApiError && error.problems.length > 0
+              ? 'This page has problems to fix before it can be saved:'
+              : error instanceof Error
+                ? error.message
+                : 'Saving failed.';
+        setSaveState({
+          status: 'error',
+          message,
+          problems: error instanceof ApiError ? error.problems : [],
+        });
+        return true;
+      }
+    };
+    const pending = run().finally(() => {
+      saving.current = null;
+    });
+    saving.current = pending;
+    return pending;
   }, [document, details, composeContent, mergeLatest, refreshFiles, linkTitles]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === 's') {
         event.preventDefault();
-        if (dirty) void save();
+        if (latest.current.dirty) void save();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [dirty, save]);
+  }, [save]);
 
   const createPage = useCallback(
     async (path: string, content: string) => {
-      if (dirty && !window.confirm('The open page has unsaved changes. Discard them?')) {
+      if (!(await confirmLeave('The open page has unsaved changes. Discard them?'))) {
         throw new Error('Save the open page first, then create the new one.');
       }
       let result;
@@ -298,6 +347,7 @@ function Workspace({ viewer }: { viewer: Viewer }) {
       }
       // open the new page from what was just saved instead of fetching it again
       const created = toOpenDocument({ path, content, ...result }, Date.now());
+      loadSeq.current++;
       const title = created.details.title || path;
       setFiles((current) => [
         ...current,
@@ -322,7 +372,20 @@ function Workspace({ viewer }: { viewer: Viewer }) {
       setDetails(created.details);
       refreshFiles();
     },
-    [dirty, refreshFiles]
+    [confirmLeave, refreshFiles]
+  );
+
+  // an upload commits to the page's draft, so the page now has a draft and a pull request to review
+  const adoptDraft = useCallback(
+    (page: string, result: UploadResult) => {
+      setDocument((current) =>
+        current?.path === page
+          ? { ...current, ref: result.branch, isDraft: true, pullRequestUrl: result.pullRequestUrl }
+          : current
+      );
+      refreshFiles();
+    },
+    [refreshFiles]
   );
 
   const media = useMemo<MediaProvider | undefined>(() => {
@@ -332,23 +395,21 @@ function Workspace({ viewer }: { viewer: Viewer }) {
         if (!imageTypes.has(file.type)) {
           throw new Error('only png, jpeg, gif and webp images can be added');
         }
-        const { src, branch } = await uploadToDraft({
-          repository,
-          page: document.path,
-          directory: cmsConfig.uploadDir,
-          file,
-        });
-        setDocument((current) => (current ? { ...current, ref: branch } : current));
-        return src;
+        const page = document.path;
+        const result = await uploadToDraft({ page, kind: 'image', file });
+        adoptDraft(page, result);
+        return result.src;
       },
       resolve: (src) =>
         src.startsWith('/img/uploads/')
           ? `https://raw.githubusercontent.com/${repository.owner}/${repository.repo}/${encodeURIComponent(document.ref)}/public${src}`
           : src,
     };
-  }, [document, repository]);
+  }, [document, repository, adoptDraft]);
 
   const fileProvider = useMemo(() => createFileProvider(repoPaths), [repoPaths]);
+
+  const activeFile = files.find((file) => file.path === document?.path);
 
   const attachPdf = async (file: File) => {
     if (!document) return;
@@ -356,24 +417,26 @@ function Workspace({ viewer }: { viewer: Viewer }) {
       setNotice({ tone: 'warn', title: 'Only PDF files can be attached', body: file.name });
       return;
     }
+    const page = document.path;
+    const pageLabel = activeFile?.label ?? document.details.title;
+    const seq = loadSeq.current;
     setUploading(true);
-    setNotice({
-      tone: 'info',
-      title: `Uploading ${file.name}…`,
-      body: 'Large reports can take a minute.',
-    });
-    try {
-      const { src, branch } = await uploadToDraft({
-        repository,
-        page: document.path,
-        directory: 'public/assets',
-        file,
-      });
-      setDocument((current) => (current ? { ...current, ref: branch } : current));
+    const showProgress = (fraction: number) =>
       setNotice({
         tone: 'info',
-        title: 'PDF uploaded to this draft',
-        body: <PdfLink src={src} />,
+        title: `Uploading ${file.name}… ${Math.round(fraction * 100)}%`,
+        body: 'Large reports can take a minute. You can keep editing while it uploads.',
+      });
+    try {
+      const result = await uploadToDraft({ page, kind: 'pdf', file, onProgress: showProgress });
+      adoptDraft(page, result);
+      setNotice({
+        tone: 'info',
+        title:
+          seq === loadSeq.current
+            ? `${file.name} was added to this page's draft`
+            : `${file.name} was added to the draft of “${pageLabel}”`,
+        body: <PdfLink src={result.src} pullRequestUrl={result.pullRequestUrl} />,
       });
     } catch (error) {
       setNotice({
@@ -387,12 +450,11 @@ function Workspace({ viewer }: { viewer: Viewer }) {
   };
 
   const signOut = async () => {
-    if (dirty && !window.confirm('You have unsaved changes. Sign out anyway?')) return;
+    if (!(await confirmLeave('You have unsaved changes. Sign out anyway?'))) return;
     await cmsApi.logout();
     window.location.reload();
   };
 
-  const activeFile = files.find((file) => file.path === document?.path);
   const pageUrl = document ? pageUrlFromPath(document.path) : null;
   const isPartial = document?.path.startsWith('content/partials/');
   const isConstitution = document?.path === cmsConfig.constitutionPath;
@@ -653,7 +715,7 @@ function Banner({
   );
 }
 
-function PdfLink({ src }: { src: string }) {
+function PdfLink({ src, pullRequestUrl }: { src: string; pullRequestUrl: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="space-y-2">
@@ -672,7 +734,11 @@ function PdfLink({ src }: { src: string }) {
       </div>
       <p className="text-xs">
         To link to it, select the words in the page, click the link button in the toolbar, and
-        paste. The file goes live when this draft is published.
+        paste. The file is saved in this page&apos;s draft, which a docs maintainer{' '}
+        <a href={pullRequestUrl} target="_blank" rel="noreferrer" className="underline">
+          reviews and publishes
+        </a>
+        . It goes live with the draft.
       </p>
     </div>
   );
