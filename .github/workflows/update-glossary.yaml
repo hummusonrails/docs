@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: 22.x
           cache: 'yarn'
+          cache-dependency-path: notion-docs/yarn.lock
       - run: npm i -g yarn
       - run: yarn
       - name: Create .env file
