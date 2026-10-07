@@ -12,10 +12,17 @@ import { pageUrlFromPath, splitFrontmatter } from '@/lib/cms/paths';
 import { siteUrl } from '@/lib/site';
 import glossary from '@/public/glossary.json';
 
-import { ApiError, cmsApi, type CmsDocument, type CmsFile, type Viewer } from './api';
+import {
+  ApiError,
+  cmsApi,
+  type CmsDocument,
+  type CmsFile,
+  type UploadResult,
+  type Viewer,
+} from './api';
 import { createFileProvider, editorComponents } from './editor-config';
 import { readDetails, writeDetails, type DetailKey, type Details } from './frontmatter';
-import { uploadToDraft } from './github-upload';
+import { uploadToDraft } from './draft-upload';
 import { nameBareLinks, relativizeSiteLinks } from './link-titles';
 import { NewPageDialog } from './new-page-dialog';
 import { PageDetails } from './page-details';
@@ -325,6 +332,19 @@ function Workspace({ viewer }: { viewer: Viewer }) {
     [dirty, refreshFiles]
   );
 
+  // an upload commits to the page's draft, so the page now has a draft and a pull request to review
+  const adoptDraft = useCallback(
+    (page: string, result: UploadResult) => {
+      setDocument((current) =>
+        current?.path === page
+          ? { ...current, ref: result.branch, isDraft: true, pullRequestUrl: result.pullRequestUrl }
+          : current
+      );
+      refreshFiles();
+    },
+    [refreshFiles]
+  );
+
   const media = useMemo<MediaProvider | undefined>(() => {
     if (!document) return undefined;
     return {
@@ -332,21 +352,17 @@ function Workspace({ viewer }: { viewer: Viewer }) {
         if (!imageTypes.has(file.type)) {
           throw new Error('only png, jpeg, gif and webp images can be added');
         }
-        const { src, branch } = await uploadToDraft({
-          repository,
-          page: document.path,
-          directory: cmsConfig.uploadDir,
-          file,
-        });
-        setDocument((current) => (current ? { ...current, ref: branch } : current));
-        return src;
+        const page = document.path;
+        const result = await uploadToDraft({ page, kind: 'image', file });
+        adoptDraft(page, result);
+        return result.src;
       },
       resolve: (src) =>
         src.startsWith('/img/uploads/')
           ? `https://raw.githubusercontent.com/${repository.owner}/${repository.repo}/${encodeURIComponent(document.ref)}/public${src}`
           : src,
     };
-  }, [document, repository]);
+  }, [document, repository, adoptDraft]);
 
   const fileProvider = useMemo(() => createFileProvider(repoPaths), [repoPaths]);
 
@@ -356,24 +372,21 @@ function Workspace({ viewer }: { viewer: Viewer }) {
       setNotice({ tone: 'warn', title: 'Only PDF files can be attached', body: file.name });
       return;
     }
+    const page = document.path;
     setUploading(true);
-    setNotice({
-      tone: 'info',
-      title: `Uploading ${file.name}…`,
-      body: 'Large reports can take a minute.',
-    });
-    try {
-      const { src, branch } = await uploadToDraft({
-        repository,
-        page: document.path,
-        directory: 'public/assets',
-        file,
-      });
-      setDocument((current) => (current ? { ...current, ref: branch } : current));
+    const showProgress = (fraction: number) =>
       setNotice({
         tone: 'info',
-        title: 'PDF uploaded to this draft',
-        body: <PdfLink src={src} />,
+        title: `Uploading ${file.name}… ${Math.round(fraction * 100)}%`,
+        body: 'Large reports can take a minute. You can keep editing while it uploads.',
+      });
+    try {
+      const result = await uploadToDraft({ page, kind: 'pdf', file, onProgress: showProgress });
+      adoptDraft(page, result);
+      setNotice({
+        tone: 'info',
+        title: `${file.name} was added to this page's draft`,
+        body: <PdfLink src={result.src} pullRequestUrl={result.pullRequestUrl} />,
       });
     } catch (error) {
       setNotice({
@@ -653,7 +666,7 @@ function Banner({
   );
 }
 
-function PdfLink({ src }: { src: string }) {
+function PdfLink({ src, pullRequestUrl }: { src: string; pullRequestUrl: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="space-y-2">
@@ -672,7 +685,11 @@ function PdfLink({ src }: { src: string }) {
       </div>
       <p className="text-xs">
         To link to it, select the words in the page, click the link button in the toolbar, and
-        paste. The file goes live when this draft is published.
+        paste. The file is saved in this page&apos;s draft, which a docs maintainer{' '}
+        <a href={pullRequestUrl} target="_blank" rel="noreferrer" className="underline">
+          reviews and publishes
+        </a>
+        . It goes live with the draft.
       </p>
     </div>
   );

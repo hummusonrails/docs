@@ -114,11 +114,64 @@ export function createGitHubClient(token: string) {
       if (existing) return existing;
       const base = await getBranchSha(cmsConfig.baseBranch);
       if (!base) throw new GitHubError(`base branch ${cmsConfig.baseBranch} not found`, 404);
-      await request(`${repoPath}/git/refs`, {
-        method: 'POST',
-        body: { ref: `refs/heads/${branch}`, sha: base },
-      });
+      try {
+        await request(`${repoPath}/git/refs`, {
+          method: 'POST',
+          body: { ref: `refs/heads/${branch}`, sha: base },
+        });
+      } catch (error) {
+        // a save and an upload can both create the draft branch at the same moment
+        const created = error instanceof GitHubError && error.status === 422;
+        const current = created ? await getBranchSha(branch) : null;
+        if (current) return current;
+        throw error;
+      }
       return base;
+    },
+
+    async createBlob(content: Buffer) {
+      const blob = await request<{ sha: string }>(`${repoPath}/git/blobs`, {
+        method: 'POST',
+        body: { content: content.toString('base64'), encoding: 'base64' },
+      });
+      return blob!.sha;
+    },
+
+    async getBlob(sha: string) {
+      const blob = await request<{ content: string; encoding: string }>(
+        `${repoPath}/git/blobs/${sha}`
+      );
+      return Buffer.from(blob!.content, 'base64');
+    },
+
+    // adds an existing blob to the branch, retrying when a save moves the branch in between
+    async commitBlob(input: { branch: string; path: string; blobSha: string; message: string }) {
+      for (let attempt = 0; ; attempt++) {
+        const head = await getBranchSha(input.branch);
+        if (!head) throw new GitHubError(`branch ${input.branch} not found`, 404);
+        const parent = await request<{ tree: { sha: string } }>(`${repoPath}/git/commits/${head}`);
+        const tree = await request<{ sha: string }>(`${repoPath}/git/trees`, {
+          method: 'POST',
+          body: {
+            base_tree: parent!.tree.sha,
+            tree: [{ path: input.path, mode: '100644', type: 'blob', sha: input.blobSha }],
+          },
+        });
+        const commit = await request<{ sha: string }>(`${repoPath}/git/commits`, {
+          method: 'POST',
+          body: { message: input.message, tree: tree!.sha, parents: [head] },
+        });
+        try {
+          await request(`${repoPath}/git/refs/heads/${encodeURIComponent(input.branch)}`, {
+            method: 'PATCH',
+            body: { sha: commit!.sha },
+          });
+          return;
+        } catch (error) {
+          const moved = error instanceof GitHubError && error.status === 422;
+          if (!moved || attempt >= 2) throw error;
+        }
+      }
     },
 
     async putFile(input: {
