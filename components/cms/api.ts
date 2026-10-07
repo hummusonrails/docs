@@ -1,3 +1,5 @@
+import type { UploadKind } from '@/lib/cms/uploads';
+
 export type Repository = {
   owner: string;
   repo: string;
@@ -34,6 +36,12 @@ export type SaveResult = {
   sha: string;
   ref: string;
   isDraft: boolean;
+  pullRequestUrl: string;
+};
+
+export type UploadResult = {
+  branch: string;
+  src: string;
   pullRequestUrl: string;
 };
 
@@ -85,9 +93,14 @@ export const cmsApi = {
   file: (path: string) => call<CmsDocument>(`/api/cms/file?path=${encodeURIComponent(path)}`),
   save: (input: { path: string; content: string; sha?: string | null; create?: boolean }) =>
     call<SaveResult>('/api/cms/file', json('PUT', input)),
-  ensureBranch: (page: string) =>
-    call<{ branch: string }>('/api/cms/branch', json('POST', { page })),
-  token: () => call<{ token: string }>('/api/cms/token'),
+  uploadChunk: (piece: Blob) =>
+    call<{ sha: string }>('/api/cms/upload/chunk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: piece,
+    }),
+  upload: (input: { page: string; kind: UploadKind; name: string; chunks: string[] }) =>
+    call<UploadResult>('/api/cms/upload', json('POST', input)),
   preview: (path: string) => call<Preview>(`/api/cms/preview?path=${encodeURIComponent(path)}`),
   logout: () => call<{ ok: boolean }>('/api/cms/logout', { method: 'POST' }),
 };
